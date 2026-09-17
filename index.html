@@ -64,7 +64,15 @@
   .acct-head{padding:13px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
     border-bottom:1px solid var(--line);background:var(--card2)}
   .acct-code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:15px;font-weight:700;
-    word-break:break-all;flex:1;min-width:140px}
+    word-break:break-all;flex:1;min-width:140px;display:flex;align-items:center;gap:8px}
+  .copy-btn{flex:none;display:inline-flex;align-items:center;justify-content:center;
+    width:30px;height:30px;padding:0;background:transparent;border:1px solid var(--line);
+    border-radius:8px;color:var(--muted);cursor:pointer;
+    transition:color .15s,border-color .15s}
+  .copy-btn:hover{color:var(--txt);border-color:var(--muted)}
+  .copy-btn:active{transform:scale(.92)}
+  .copy-btn svg{width:15px;height:15px;display:block}
+  .copy-btn.ok{color:var(--ok);border-color:var(--ok)}
   .badge{font-size:12px;font-weight:700;padding:4px 9px;border-radius:20px;white-space:nowrap}
   .badge.ok{background:rgba(37,194,110,.15);color:var(--ok)}
   .badge.warn{background:rgba(247,166,0,.15);color:var(--warn)}
@@ -275,6 +283,40 @@ function cargar(silent){
   });
 }
 
+var ICONO_COPIAR='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+var ICONO_OK='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>';
+
+function botonCopiar(texto){
+  return '<button type="button" class="copy-btn" data-copiar="'+esc(texto)+'"'
+       + ' title="Copiar codigo" aria-label="Copiar codigo">'+ICONO_COPIAR+'</button>';
+}
+
+function copiarTexto(txt){
+  if(navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(txt);
+  return new Promise(function(ok,mal){
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=txt; ta.setAttribute('readonly','');
+      ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0,999999);
+      var hecho=document.execCommand('copy');
+      document.body.removeChild(ta);
+      hecho ? ok() : mal(new Error('sin permiso'));
+    }catch(e){ mal(e); }
+  });
+}
+
+document.addEventListener('click', function(ev){
+  var b = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+  if(!b) return;
+  ev.preventDefault(); ev.stopPropagation();
+  copiarTexto(b.getAttribute('data-copiar')||'').then(function(){
+    b.classList.add('ok'); b.innerHTML=ICONO_OK; b.title='Copiado';
+    clearTimeout(b._tc);
+    b._tc=setTimeout(function(){ b.classList.remove('ok'); b.innerHTML=ICONO_COPIAR; b.title='Copiar codigo'; }, 1300);
+  }).catch(function(){ b.title='No se pudo copiar'; });
+});
+
 function pintar(){
   var q=($('buscar').value||'').toLowerCase().trim();
   var cuentas=DATA;
@@ -313,7 +355,7 @@ function pintar(){
 
     html+='<div class="acct">';
     html+='<div class="acct-head">';
-    html+='<div class="acct-code">'+esc(c.codigo)+'</div>';
+    html+='<div class="acct-code"><span>'+esc(c.codigo)+'</span>'+botonCopiar(c.codigo)+'</div>';
     html+='<div>Caduca cuenta '+badgeFecha(c.caduca)+'</div>';
     html+='<button class="mini" onclick="editarCuenta(\''+esc(c.codigo).replace(/'/g,"\\'")+'\')">✎ Cuenta</button>';
     html+='</div>';
