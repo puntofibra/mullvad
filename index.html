@@ -163,28 +163,114 @@
 var PASS = "";
 var DATA = []; // cuentas
 
-// ---------- JSONP ----------
-function api(params){
+// ---------- JSONP robusto ----------
+// Apps Script puede tardar bastante (arranque en frio) o fallar de forma puntual.
+// Por eso: timeout largo, reintento automatico y, si la respuesta llega tarde,
+// se aprovecha igual en vez de perderse.
+var API_TIMEOUT = 45000;
+
+function jsonp(params){
   return new Promise(function(resolve,reject){
     var cb = 'cb_' + Date.now() + '_' + Math.floor(Math.random()*1e6);
+    var s = null, listo = false;
+    function quitarScript(){ if(s && s.parentNode) s.parentNode.removeChild(s); }
+    function borrarCb(){ try{ delete window[cb]; }catch(e){ window[cb]=undefined; } }
+
     var timeout = setTimeout(function(){
-      cleanup(); reject(new Error('Sin respuesta del servidor'));
-    }, 20000);
-    function cleanup(){
-      clearTimeout(timeout);
-      try{ delete window[cb]; }catch(e){ window[cb]=undefined; }
-      if(s && s.parentNode) s.parentNode.removeChild(s);
-    }
-    window[cb] = function(data){ cleanup(); resolve(data); };
+      if(listo) return;
+      listo = true;
+      quitarScript();
+      // OJO: no borramos el callback. Si Google contesta tarde, lo aprovechamos.
+      window[cb] = function(data){ borrarCb(); respuestaTardia(params, data); };
+      setTimeout(borrarCb, 180000);
+      reject(new Error('El servidor tarda demasiado, vuelve a intentarlo'));
+    }, API_TIMEOUT);
+
+    window[cb] = function(data){
+      if(listo) return;
+      listo = true; clearTimeout(timeout); quitarScript(); borrarCb();
+      resolve(data);
+    };
+
     var qs = 'callback=' + cb;
     for(var k in params){ if(params.hasOwnProperty(k)){
       qs += '&' + k + '=' + encodeURIComponent(params[k]==null?'':params[k]);
     }}
-    var s = document.createElement('script');
-    s.src = API_URL + (API_URL.indexOf('?')>=0?'&':'?') + qs;
-    s.onerror = function(){ cleanup(); reject(new Error('Error de red / URL incorrecta')); };
+    s = document.createElement('script');
+    s.src = API_URL + (API_URL.indexOf('?')>=0?'&':'?') + qs + '&_=' + Date.now();
+    s.onerror = function(){
+      if(listo) return;
+      listo = true; clearTimeout(timeout); quitarScript(); borrarCb();
+      var err = new Error('Fallo de red con el servidor'); err.red = true; reject(err);
+    };
     document.body.appendChild(s);
   });
+}
+
+// Llamada normal por fetch: es mas rapida y da errores de verdad.
+// (El backend responde JSON puro cuando no se le pide callback.)
+function llamarFetch(params){
+  var qs=[];
+  for(var k in params){ if(params.hasOwnProperty(k)){
+    qs.push(k+'='+encodeURIComponent(params[k]==null?'':params[k]));
+  }}
+  var url = API_URL + (API_URL.indexOf('?')>=0?'&':'?') + qs.join('&') + '&_=' + Date.now();
+  var ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
+  var to = setTimeout(function(){ if(ctrl) ctrl.abort(); }, API_TIMEOUT);
+  return fetch(url, {
+      credentials:'omit',   // sin cookies de Google: evita los redirects de cuenta que cuelgan
+      redirect:'follow',
+      signal: ctrl ? ctrl.signal : undefined
+    })
+    .then(function(res){
+      if(!res.ok){ var e=new Error('El servidor respondio '+res.status); e.red=true; throw e; }
+      return res.text();
+    })
+    .then(function(txt){
+      clearTimeout(to);
+      txt = String(txt).trim();
+      if(txt.charAt(0)!=='{'){               // por si llegara envuelto en JSONP
+        var i=txt.indexOf('('), j=txt.lastIndexOf(')');
+        if(i>=0 && j>i) txt = txt.slice(i+1, j);
+      }
+      return JSON.parse(txt);
+    })
+    .catch(function(e){
+      clearTimeout(to);
+      if(e && e.name==='AbortError'){
+        var t=new Error('El servidor tarda demasiado, vuelve a intentarlo'); t.red=true; throw t;
+      }
+      if(e) e.red=true;
+      throw e;
+    });
+}
+
+function espera(ms){ return new Promise(function(ok){ setTimeout(ok, ms); }); }
+
+function api(params){
+  if(!window.fetch || !window.Promise) return jsonp(params);
+  var escritura = params.action && params.action!=='listar' && params.action!=='login';
+  var maxReintentos = escritura ? 1 : 2;
+  function intento(n){
+    return llamarFetch(params).catch(function(e){
+      if(n < maxReintentos){
+        return espera(700*(n+1)).then(function(){ return intento(n+1); });
+      }
+      return jsonp(params);   // ultimo cartucho, por si fetch estuviese bloqueado
+    });
+  }
+  return intento(0);
+}
+
+// Respuesta que llega despues de haber dado la llamada por perdida
+function respuestaTardia(params, data){
+  if(!data || !data.ok) return;
+  if(data.cuentas){
+    aplicarLista(data.cuentas);
+    if(params.action!=='listar') toast('Llego con retraso, pero se guardo');
+  } else if(params.action!=='listar'){
+    cargar(true);
+  }
 }
 
 // ---------- Utilidades ----------
@@ -261,26 +347,60 @@ function enterApp(silent){
 }
 function logout(){
   PASS='';
-  try{ localStorage.removeItem('mv_pass'); }catch(e){}
+  DATA=[];
+  try{ localStorage.removeItem('mv_pass'); localStorage.removeItem('mv_cache'); }catch(e){}
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
   $('pass').value='';
 }
 
 // ---------- CARGAR / PINTAR ----------
+function aplicarLista(cuentas){
+  DATA = cuentas || [];
+  try{ localStorage.setItem('mv_cache', JSON.stringify(DATA)); }catch(e){}
+  pintar();
+}
+function pintarDesdeCache(){
+  try{
+    var c = localStorage.getItem('mv_cache');
+    if(c){ var d = JSON.parse(c); if(d && d.length){ DATA = d; pintar(); return true; } }
+  }catch(e){}
+  return false;
+}
+function trasGuardar(r){
+  if(r && r.cuentas) aplicarLista(r.cuentas);
+  else cargar(true);
+}
 function cargar(silent){
-  if(!silent) $('lista').innerHTML='<div class="spin">Cargando…</div>';
+  var hayDatos = (DATA && DATA.length) ? true : pintarDesdeCache();
+  if(!silent && !hayDatos) $('lista').innerHTML='<div class="spin">Cargando\u2026</div>';
   api({action:'listar',pass:PASS}).then(function(r){
     if(!r||!r.ok){
       if(r&&r.error&&/contrase/i.test(r.error)){ logout(); return; }
-      $('lista').innerHTML='<div class="empty-state">Error: '+esc(r&&r.error||'?')+'</div>';
+      if(hayDatos) toast('Error: '+(r&&r.error||'?'));
+      else $('lista').innerHTML='<div class="empty-state">Error: '+esc(r&&r.error||'?')+'</div>';
       return;
     }
-    DATA=r.cuentas||[];
-    pintar();
+    aplicarLista(r.cuentas||[]);
   }).catch(function(e){
-    $('lista').innerHTML='<div class="empty-state">'+esc(e.message)+'</div>';
+    if(hayDatos) toast(e.message);
+    else $('lista').innerHTML='<div class="empty-state">'+esc(e.message)+'</div>';
   });
+}
+
+// Deja el modal en modo "guardando" para que no se pueda pulsar dos veces
+function modalOcupado(txt){
+  var m = document.querySelector('.modal');
+  if(!m) return function(){};
+  var btns = m.querySelectorAll('button');
+  var prim = m.querySelector('.modal-actions .btn:not(.sec)');
+  var antes = prim ? prim.textContent : '';
+  for(var i=0;i<btns.length;i++) btns[i].disabled = true;
+  if(prim) prim.textContent = txt || 'Guardando\u2026';
+  return function(){
+    for(var i=0;i<btns.length;i++) btns[i].disabled = false;
+    if(prim) prim.textContent = antes;
+  };
 }
 
 var ICONO_COPIAR='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
@@ -418,11 +538,13 @@ function nuevaCuenta(){
 function guardarNuevaCuenta(){
   var cod=($('m_cod').value||'').trim();
   if(!cod){ toast('Escribe el código'); return; }
+  var fin=modalOcupado('Creando\u2026');
   api({action:'altaCuenta',pass:PASS,codigo:cod,caduca:$('m_cad').value||'',notas:$('m_notas').value||''})
   .then(function(r){
-    if(r&&r.ok){ closeModal(); toast('Cuenta creada'); cargar(true); }
+    fin();
+    if(r&&r.ok){ closeModal(); toast('Cuenta creada'); trasGuardar(r); }
     else toast(r&&r.error||'Error');
-  }).catch(function(e){ toast(e.message); });
+  }).catch(function(e){ fin(); toast(e.message); });
 }
 
 function editarCuenta(cod){
@@ -446,18 +568,22 @@ function editarCuenta(cod){
   $('modalRoot').innerHTML=html;
 }
 function guardarCuenta(cod){
+  var fin=modalOcupado();
   api({action:'guardarCaducidad',pass:PASS,codigo:cod,caduca:$('e_cad').value||'',notas:$('e_notas').value||''})
   .then(function(r){
-    if(r&&r.ok){ closeModal(); toast('Guardado'); cargar(true); }
+    fin();
+    if(r&&r.ok){ closeModal(); toast('Guardado'); trasGuardar(r); }
     else toast(r&&r.error||'Error');
-  }).catch(function(e){ toast(e.message); });
+  }).catch(function(e){ fin(); toast(e.message); });
 }
 function borrarCuenta(cod){
   if(!confirm('¿Borrar la cuenta '+cod+' y todos sus dispositivos?')) return;
+  var fin=modalOcupado('Borrando\u2026');
   api({action:'borrarCuenta',pass:PASS,codigo:cod}).then(function(r){
-    if(r&&r.ok){ closeModal(); toast('Cuenta borrada'); cargar(true); }
+    fin();
+    if(r&&r.ok){ closeModal(); toast('Cuenta borrada'); trasGuardar(r); }
     else toast(r&&r.error||'Error');
-  }).catch(function(e){ toast(e.message); });
+  }).catch(function(e){ fin(); toast(e.message); });
 }
 
 function editarDisp(cod,slot){
@@ -510,21 +636,25 @@ function toggleDeposito(){
 function guardarDisp(cod,slot){
   var router=$('d_router').value||'';
   var dep=(router==='Cedido') ? ($('d_dep').value||'') : '';
+  var fin=modalOcupado();
   api({action:'guardarDispositivo',pass:PASS,codigo:cod,slot:slot,
     dispositivo:$('d_disp').value||'',cliente:$('d_cli').value||'',
     pagadoHasta:$('d_pag').value||'',importe:$('d_imp').value||'',
     router:router,deposito:dep})
   .then(function(r){
-    if(r&&r.ok){ closeModal(); toast('Guardado'); cargar(true); }
+    fin();
+    if(r&&r.ok){ closeModal(); toast('Guardado'); trasGuardar(r); }
     else toast(r&&r.error||'Error');
-  }).catch(function(e){ toast(e.message); });
+  }).catch(function(e){ fin(); toast(e.message); });
 }
 function borrarDisp(cod,slot){
   if(!confirm('¿Vaciar el dispositivo '+slot+'?')) return;
+  var fin=modalOcupado('Vaciando\u2026');
   api({action:'borrarDispositivo',pass:PASS,codigo:cod,slot:slot}).then(function(r){
-    if(r&&r.ok){ closeModal(); toast('Vaciado'); cargar(true); }
+    fin();
+    if(r&&r.ok){ closeModal(); toast('Vaciado'); trasGuardar(r); }
     else toast(r&&r.error||'Error');
-  }).catch(function(e){ toast(e.message); });
+  }).catch(function(e){ fin(); toast(e.message); });
 }
 
 // ---------- Eventos ----------
