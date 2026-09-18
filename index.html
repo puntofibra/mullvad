@@ -209,14 +209,14 @@ function jsonp(params){
 
 // Llamada normal por fetch: es mas rapida y da errores de verdad.
 // (El backend responde JSON puro cuando no se le pide callback.)
-function llamarFetch(params){
+function llamarFetch(params, msTimeout){
   var qs=[];
   for(var k in params){ if(params.hasOwnProperty(k)){
     qs.push(k+'='+encodeURIComponent(params[k]==null?'':params[k]));
   }}
   var url = API_URL + (API_URL.indexOf('?')>=0?'&':'?') + qs.join('&') + '&_=' + Date.now();
   var ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
-  var to = setTimeout(function(){ if(ctrl) ctrl.abort(); }, API_TIMEOUT);
+  var to = setTimeout(function(){ if(ctrl) ctrl.abort(); }, msTimeout || API_TIMEOUT);
   return fetch(url, {
       credentials:'omit',   // sin cookies de Google: evita los redirects de cuenta que cuelgan
       redirect:'follow',
@@ -247,14 +247,16 @@ function llamarFetch(params){
 
 function espera(ms){ return new Promise(function(ok){ setTimeout(ok, ms); }); }
 
+// Cuando Google se atasca, lo suyo es cortar pronto y volver a pedirlo:
+// el segundo intento suele contestar en menos de un segundo.
+var ESPERAS = [12000, 20000, 45000];
+
 function api(params){
   if(!window.fetch || !window.Promise) return jsonp(params);
-  var escritura = params.action && params.action!=='listar' && params.action!=='login';
-  var maxReintentos = escritura ? 1 : 2;
   function intento(n){
-    return llamarFetch(params).catch(function(e){
-      if(n < maxReintentos){
-        return espera(700*(n+1)).then(function(){ return intento(n+1); });
+    return llamarFetch(params, ESPERAS[n]).catch(function(e){
+      if(n < ESPERAS.length - 1){
+        return espera(500).then(function(){ return intento(n+1); });
       }
       return jsonp(params);   // ultimo cartucho, por si fetch estuviese bloqueado
     });
