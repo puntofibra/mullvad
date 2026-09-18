@@ -247,12 +247,43 @@ function llamarFetch(params, msTimeout){
 
 function espera(ms){ return new Promise(function(ok){ setTimeout(ok, ms); }); }
 
-// Cuando Google se atasca, lo suyo es cortar pronto y volver a pedirlo:
-// el segundo intento suele contestar en menos de un segundo.
+// Apps Script a veces se queda colgado en la primera peticion (arranque en frio).
+// Para LEER no esperamos: a los 6 s se lanza otra peticion en paralelo y nos
+// quedamos con la primera que conteste. Para GUARDAR se reintenta en serie.
 var ESPERAS = [12000, 20000, 45000];
+var REFUERZOS = [6000, 15000];
+
+function apiLectura(params){
+  return new Promise(function(resolve, reject){
+    var hecho = false, lanzados = 0, fallos = 0, timers = [];
+    function limpiar(){ for(var i=0;i<timers.length;i++) clearTimeout(timers[i]); }
+    function lanzar(){
+      lanzados++;
+      llamarFetch(params, 50000).then(function(r){
+        if(hecho) return;
+        hecho = true; limpiar(); resolve(r);
+      }, function(e){
+        fallos++;
+        if(hecho) return;
+        if(fallos >= REFUERZOS.length + 1){ hecho = true; limpiar(); reject(e); }
+      });
+    }
+    lanzar();
+    for(var i=0;i<REFUERZOS.length;i++){
+      (function(ms){ timers.push(setTimeout(function(){ if(!hecho) lanzar(); }, ms)); })(REFUERZOS[i]);
+    }
+    timers.push(setTimeout(function(){
+      if(hecho) return;
+      hecho = true; limpiar();
+      reject(new Error('El servidor no responde, prueba otra vez'));
+    }, 52000));
+  });
+}
 
 function api(params){
   if(!window.fetch || !window.Promise) return jsonp(params);
+  var lectura = (params.action === 'listar' || params.action === 'login' || params.action === 'ping');
+  if(lectura) return apiLectura(params).catch(function(){ return jsonp(params); });
   function intento(n){
     return llamarFetch(params, ESPERAS[n]).catch(function(e){
       if(n < ESPERAS.length - 1){
